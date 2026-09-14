@@ -5,28 +5,14 @@ const anonKey = import.meta.env.VITE_SUPABASE_ANON_KEY;
 
 export const configured = Boolean(url && anonKey);
 
-// Two clients so "Remember me" can genuinely choose between a persistent
-// (localStorage) session and a tab-only (sessionStorage) session, rather
-// than just being a decorative checkbox.
-export const supabasePersist = configured
+// A single client for the whole app. Supabase explicitly recommends against
+// running more than one GoTrueClient in the same browser context — a
+// previous version of this file created a second client (for a "tab-only"
+// remember-me session) and the two clients raced over token refresh,
+// intermittently leaving requests unauthenticated even right after a
+// successful sign-in.
+export const supabase = configured
   ? createClient(url, anonKey, {
       auth: { persistSession: true, autoRefreshToken: true, storage: window.localStorage },
     })
   : null;
-
-export const supabaseSession = configured
-  ? createClient(url, anonKey, {
-      auth: { persistSession: true, autoRefreshToken: true, storage: window.sessionStorage },
-    })
-  : null;
-
-const REMEMBER_KEY = "smp_remember_me";
-
-export function getPreferredClient() {
-  const remember = localStorage.getItem(REMEMBER_KEY) !== "0";
-  return remember ? supabasePersist : supabaseSession;
-}
-
-export function setRememberMe(remember) {
-  localStorage.setItem(REMEMBER_KEY, remember ? "1" : "0");
-}

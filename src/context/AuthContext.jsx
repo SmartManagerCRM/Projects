@@ -1,42 +1,67 @@
 import { createContext, useContext, useEffect, useMemo, useState } from "react";
-import { configured, getPreferredClient, setRememberMe, supabasePersist } from "../lib/supabaseClient.js";
+import { configured, supabase } from "../lib/supabaseClient.js";
 
 const AuthContext = createContext(null);
 
+// The session itself always lives in localStorage (one client, per Supabase's
+// own guidance). "Remember me" is layered on top with two small flags: a
+// sessionStorage marker that only survives while the tab stays open, and a
+// localStorage marker recorded at sign-in time. If the tab was closed and
+// reopened (sessionStorage marker gone) after an "unchecked" sign-in
+// (localStorage marker says ephemeral), we sign out on boot before anything
+// else runs — giving a real "forget me after this browser session" without
+// running two competing Supabase clients.
+const EPHEMERAL_KEY = "smp_ephemeral_login";
+const TAB_ALIVE_KEY = "smp_tab_alive";
+
+export function markLoginPersistence(remember) {
+  localStorage.setItem(EPHEMERAL_KEY, remember ? "0" : "1");
+  sessionStorage.setItem(TAB_ALIVE_KEY, "1");
+}
+
+async function enforceRememberMe() {
+  if (localStorage.getItem(EPHEMERAL_KEY) === "1" && !sessionStorage.getItem(TAB_ALIVE_KEY)) {
+    localStorage.removeItem(EPHEMERAL_KEY);
+    await supabase.auth.signOut();
+  }
+  sessionStorage.setItem(TAB_ALIVE_KEY, "1");
+}
+
 export function AuthProvider({ children }) {
-  const [client, setClient] = useState(() => getPreferredClient() || supabasePersist);
   const [session, setSession] = useState(null);
   const [loading, setLoading] = useState(configured);
 
   useEffect(() => {
-    if (!client) {
+    if (!supabase) {
       setLoading(false);
       return;
     }
     let active = true;
-    client.auth.getSession().then(({ data }) => {
-      if (!active) return;
-      setSession(data.session);
-      setLoading(false);
-    });
-    const { data: sub } = client.auth.onAuthStateChange((_event, sess) => {
+    enforceRememberMe().then(() =>
+      supabase.auth.getSession().then(({ data }) => {
+        if (!active) return;
+        setSession(data.session);
+        setLoading(false);
+      })
+    );
+    const { data: sub } = supabase.auth.onAuthStateChange((_event, sess) => {
       setSession(sess);
     });
     return () => {
       active = false;
       sub.subscription.unsubscribe();
     };
-  }, [client]);
+  }, []);
 
   const value = useMemo(
     () => ({
       configured,
-      supabase: client,
+      supabase,
       session,
       user: session?.user || null,
       loading,
       async signUp({ email, password, fullName, phone, companyName, companyType, country }) {
-        return client.auth.signUp({
+        return supabase.auth.signUp({
           email,
           password,
           options: {
@@ -51,29 +76,29 @@ export function AuthProvider({ children }) {
           },
         });
       },
-      async signIn({ email, password, remember }) {
-        setRememberMe(remember);
-        const target = getPreferredClient();
-        const result = await target.auth.signInWithPassword({ email, password });
-        if (!result.error) setClient(target);
+      async signIn({ email, password, remember = true }) {
+        const result = await supabase.auth.signInWithPassword({ email, password });
+        if (!result.error) markLoginPersistence(remember);
         return result;
       },
       async resendVerification(email) {
-        return client.auth.resend({ type: "signup", email, options: { emailRedirectTo: `${window.location.origin}/` } });
+        return supabase.auth.resend({ type: "signup", email, options: { emailRedirectTo: `${window.location.origin}/` } });
       },
       async requestPasswordReset(email) {
-        return client.auth.resetPasswordForEmail(email, {
+        return supabase.auth.resetPasswordForEmail(email, {
           redirectTo: `${window.location.origin}/reset-password`,
         });
       },
       async updatePassword(password) {
-        return client.auth.updateUser({ password });
+        return supabase.auth.updateUser({ password });
       },
       async signOut() {
-        return client.auth.signOut();
+        localStorage.removeItem(EPHEMERAL_KEY);
+        sessionStorage.removeItem(TAB_ALIVE_KEY);
+        return supabase.auth.signOut();
       },
     }),
-    [client, session, loading]
+    [session, loading]
   );
 
   return <AuthContext.Provider value={value}>{children}</AuthContext.Provider>;
