@@ -120,24 +120,28 @@ export function CompanyProvider({ children }) {
 
   const bootstrapCompany = useCallback(
     async ({ companyInfo, modules, project }) => {
-      const { data: newCompany, error: companyErr } = await supabase
-        .from("companies")
-        .insert({
-          name: companyInfo.name,
-          company_type: companyInfo.company_type,
-          country: companyInfo.country,
-          city: companyInfo.city,
-          logo_url: companyInfo.logo_url || null,
-          employees_range: companyInfo.employees_range,
-          currency: companyInfo.currency || "SAR",
-          modules,
-        })
-        .select()
-        .single();
+      // The companies row can't be created with `.select()` here: Postgres
+      // RLS checks a RETURNING clause against the SELECT policy, which
+      // requires an existing company_members row — and that row doesn't
+      // exist yet at this exact instant (it's the very next statement). So
+      // we mint the id ourselves, insert without asking for it back, create
+      // the membership, and only then fetch the row (now visible).
+      const newCompanyId = crypto.randomUUID();
+      const { error: companyErr } = await supabase.from("companies").insert({
+        id: newCompanyId,
+        name: companyInfo.name,
+        company_type: companyInfo.company_type,
+        country: companyInfo.country,
+        city: companyInfo.city,
+        logo_url: companyInfo.logo_url || null,
+        employees_range: companyInfo.employees_range,
+        currency: companyInfo.currency || "SAR",
+        modules,
+      });
       if (companyErr) throw companyErr;
 
       const { error: memberErr } = await supabase.from("company_members").insert({
-        company_id: newCompany.id,
+        company_id: newCompanyId,
         user_id: user.id,
         full_name: user.user_metadata?.full_name || user.email,
         email: user.email,
@@ -145,6 +149,13 @@ export function CompanyProvider({ children }) {
         status: "active",
       });
       if (memberErr) throw memberErr;
+
+      const { data: newCompany, error: fetchErr } = await supabase
+        .from("companies")
+        .select("*")
+        .eq("id", newCompanyId)
+        .single();
+      if (fetchErr) throw fetchErr;
 
       await supabase.from("automations").insert(
         DEFAULT_AUTOMATIONS.map((a) => ({ company_id: newCompany.id, ...a, enabled: true }))
